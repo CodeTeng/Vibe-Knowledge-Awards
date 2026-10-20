@@ -1,0 +1,19 @@
+《可得性偏差》— 代码生成知识短片（鎏金暗场 / gilt，1920×1080，30fps，120s）
+
+源码结构
+  films/availability_bias/film.js        画面源码（纯 t 函数，window.draw(t)=seek(t)）
+  films/availability_bias/index.html     页面（挂载 engine/ 下的 vk.js、vk-kit.js、字体）
+  films/availability_bias/storyboard.md  事实表 + 带时间码分镜表（已核实出处）
+  engine/                                 渲染引擎（vk.js vk-kit.js render.py audio.py）
+  scripts/new_film.py                     建工程脚手架
+  assets/default_bgm.mp3                  配乐（~112BPM，片长 120s 落在小节头，118-120 淡出）
+
+复现（macOS）
+  1) 安装依赖：pip install playwright numpy scipy Pillow；需本机 Google Chrome
+  2) 字体：python engine/get_fonts.py   # 下载 Noto Serif/Sans SC 等（OFL 许可）
+  3) 需要含 libx264/aac 的 ffmpeg（如 Homebrew：brew install ffmpeg）
+  4) 导出事件：python engine/render.py films/availability_bias --events
+  5) 渲染：    python engine/render.py films/availability_bias --jobs 4
+  6) 合成：    python engine/audio.py  films/availability_bias --probe   # 叠 BGM+事件音，限峰防爆
+  7) 封面：    python engine/render.py films/availability_bias --cover 18.5
+  产物：renders/final.mp4（H.264+AAC）、renders/cover.jpg
