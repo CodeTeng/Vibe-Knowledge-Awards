@@ -24,7 +24,7 @@
 
 ## 安装到本地 Agent
 
-> **Tips｜最省事的装法**:直接把本仓库地址发给能执行命令的 Agent(如 Claude Code),说一句"帮我把这个 skill 装到本地:git@github.com:CodeTeng/Vibe-Knowledge-Awards.git",它就能自动 clone、放进 skill 目录、装好依赖和字体。下面是手动步骤。
+> **Tips｜最省事的装法**:直接把本仓库地址发给能执行命令的 Agent(如 Claude Code),说一句"帮我把这个 skill 装到本地:https://github.com/CodeTeng/Vibe-Knowledge-Awards",它就能自动 clone、放进 skill 目录、装好依赖和字体。下面是手动步骤。
 
 把本仓库放进 Agent 的 skill 目录,**文件夹名保持 `vibe-knowledge-awards`**(要与 `SKILL.md` 里的技能名一致,仓库名和这个文件夹名可以不同)。Claude Code 的常见位置是 `~/.claude/skills/vibe-knowledge-awards`。
 

@@ -24,7 +24,7 @@ It is not template-filling: every shot is written against a storyboard, each con
 
 ## Install to your local Agent
 
-> **Tip — easiest install**: just give the repo URL to a command-capable agent (e.g. Claude Code) and say *"install this skill locally: git@github.com:CodeTeng/Vibe-Knowledge-Awards.git"*. It will clone it, drop it into your skills folder, and set up the dependencies and fonts for you. Manual steps are below.
+> **Tip — easiest install**: just give the repo URL to a command-capable agent (e.g. Claude Code) and say *"install this skill locally: https://github.com/CodeTeng/Vibe-Knowledge-Awards"*. It will clone it, drop it into your skills folder, and set up the dependencies and fonts for you. Manual steps are below.
 
 Put this repo into your agent's skills directory, **keeping the folder name `vibe-knowledge-awards`** (it must match the skill name in `SKILL.md`; the GitHub repo name and this folder name may differ). For Claude Code that is usually `~/.claude/skills/vibe-knowledge-awards`.
 
