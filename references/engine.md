@@ -29,10 +29,14 @@ python engine/render.py <工程> --sheet 3.5 9 21.5       # 指定时刻拼一�
 python engine/render.py <工程> --motion 8.2 10.6        # 这段时间里均匀取 12 帧拼一张 → review/motion_8.2-10.6.jpg（看转场）
 python engine/render.py <工程> --clip 0 30 head         # 只渲 0–30s → renders/head.mp4
 python engine/render.py <工程> --det                    # 确定性自检
+python engine/render.py <工程> --density [fps]          # 动效密度自检：逐帧相邻差，标出静止段 → review/density.png
 python engine/render.py <工程>                          # 全片 → renders/raw.mp4（无声）
 python engine/render.py <工程> --jobs 4                 # 全片，分 4 段并行渲再无损拼接
 python engine/render.py <工程> --events                 # 导出音效事件表 → audio/events.json
-python engine/audio.py  <工程>                          # 合成声音 + 合片 → renders/final.mp4
+python engine/audio.py  <工程>                          # 合成声音 + 合片 → renders/final.mp4（有 meta.bed 则自动带床）
+python engine/audio.py  <工程> --dense                  # 密集织体派：床 + 关 hush + −14 LUFS（爆款那种"满"）
+python engine/audio.py  <工程> --bed --probe            # 合成一层持续节拍织体垫底，并导出音轨体检图 audio/probe.png
+python engine/audio.py  <工程> --lufs -12               # 指定成片响度
 python engine/audio.py  <工程> --bgm 曲子.mp3 -8        # 垫现成配乐（-8 dB），事件音照叠
 ```
 
@@ -169,6 +173,15 @@ function urn(fr, t) {
 **声音事件** `fr.sfx(时刻, 名字, 参数)`。在哪一帧调都行，同一个（时刻，名字）只记一次；`render.py --events` 会把全片过一遍收集起来。
 名字：`tick`（一声嗒，`pitch` 选音高）`soft` `chord`（`root` 半音偏移）`bloom`（和弦 + 一口气）`rise`（上滑音，`dur`）
 `thud` `tock` `stamp` `shimmer` `hush`（之后彻底静音 `dur` 秒）。都有 `gain`。
+
+`film({ meta })` 里可写声音参数：`root`（全片移调半音）、`drone`（0…1 低频垫底强度）、`noise: [[起,止,强度],…]`（说到噪声就铺噪声）、
+`silence: [[起,止],…]`（彻底静音段）、`bed`（持续节拍织体，爆款那种"满"的底色）。`bed` 写法：
+```js
+meta: { bed: { bpm: 77, key: 'Am', gain: 1.0,
+  sections: '0,8,pad;8,40,full;40,55,arp;55,70,piano;70,80,outro' } }   // 织体从轻到满：pad<piano<full<arp<outro
+}
+```
+床连续不断，不受 `hush`/`silence` 门控——事件音该静还静，床一直走。写了 `bed` 就自动合成（也可渲染时 `--bed`/`--dense` 临时开）。编排对照见 `worlds.md` 的音效编排表。
 
 ## 底和出帧：`fr.look`
 

@@ -1,58 +1,109 @@
-# vibe-knowledge-film
+# Vibe-Knowledge-Awards
 
-你一定见过这种视频。最近抖音上爆火的 Vibe 知识大赏，看完收获满满。
+<p align="center">
+  <img src="https://img.shields.io/badge/type-Agent%20Skill-6E56CF" alt="type">
+  <img src="https://img.shields.io/badge/render-Canvas%20%2B%20seek(t)-0A7CFF" alt="render">
+  <img src="https://img.shields.io/badge/audio-numpy%20synth-1DB954" alt="audio">
+  <img src="https://img.shields.io/badge/ratio-16%3A9%20%7C%201920%C3%971080-FF8A00" alt="ratio">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
+</p>
 
-这种视频到底怎么做？我做了一个 skill，可以一键生成这种类型的视频。成片在下面。
+<p align="center"><b>用代码把一个知识点逐帧画成抖音「Vibe 知识大赏」式的无旁白短片。</b></p>
 
-这个 skill 有两种模式。一个叫「夜曲」，适合讲底层、难懂的知识。另一个叫「寓言」，适合把心理、行为这类逻辑，直观地演给观众看。这两种是我拆了市面上几条爆款之后，总结出来的两种热门画风。
+<p align="center"><b>简体中文</b> · <a href="README-en.md">English</a></p>
 
-用的时候，直接把写好的文案或者一个选题丢给它。内容确认之后再生成视频。它会自己选对应的画风，写字幕稿，排分镜表，最后建对应的代码工程。先给你一段 30 秒左右的样片，确认清楚才做全片。音效它会配上，BGM 可以自己加。
+---
 
-原理不复杂。用 Canvas 和 JavaScript 把每一帧画出来，驱动浏览器一帧一帧截图，压成视频，再混上声音。字体都是开源的。说白了，就是用代码做这样一条视频。
+## 这是什么
 
-## 夜曲：《折叠》
+一个给 AI Agent 用的 **skill**:做抖音「Vibe 知识大赏」式的**无旁白知识短片**。
 
-题目是蛋白质折叠，2024 年诺贝尔化学奖。这里是开头 33 秒。
+成片 2–5 分钟、16:9 横屏、**没有人声**——观众读底部一行字幕,同时看屏上把这句话**演出来**。整片不拍摄、不剪素材,而是**由代码逐帧画出**:Canvas + JavaScript 画每一帧 → Playwright 驱动本机浏览器逐帧截图 → ffmpeg 压成视频 → 再混上声音。
 
-![折叠](examples/fold_C.gif)
+它不是模板套用:每一镜的画面都照分镜表现写,先给概念找一个外行认得的形象,句子里说到什么屏上就是什么、动词真的发生。完整的创作方法论和流程在 `SKILL.md` 与 `references/`。
 
-## 寓言：《鸽子的迷信》
+## 安装到本地 Agent
 
-一只鸽子怎么变得迷信。这里是开头 33 秒。
+> **Tips｜最省事的装法**:直接把本仓库地址发给能执行命令的 Agent(如 Claude Code),说一句"帮我把这个 skill 装到本地:git@github.com:CodeTeng/Vibe-Knowledge-Awards.git",它就能自动 clone、放进 skill 目录、装好依赖和字体。下面是手动步骤。
 
-![鸽子的迷信](examples/pigeon_B.gif)
-
-## 安装
-
-把这个目录放到 Agent 的 skill 目录，文件夹名保持 `vibe-knowledge-film`。Claude Code 的常见位置是 `~/.claude/skills/vibe-knowledge-film`。交给 Agent 的流程在 `SKILL.md`。
+把本仓库放进 Agent 的 skill 目录,**文件夹名保持 `vibe-knowledge-awards`**(要与 `SKILL.md` 里的技能名一致,仓库名和这个文件夹名可以不同)。Claude Code 的常见位置是 `~/.claude/skills/vibe-knowledge-awards`。
 
 ```bash
-pip install -r requirements.txt
-python -m playwright install
-python engine/get_fonts.py
+git clone git@github.com:CodeTeng/Vibe-Knowledge-Awards.git vibe-knowledge-awards
+# 放到你的 agent skill 目录,例如:
+#   mv vibe-knowledge-awards ~/.claude/skills/
+
+cd vibe-knowledge-awards
+pip install -r requirements.txt     # playwright / numpy / scipy / Pillow
+python -m playwright install        # 下浏览器驱动
+python engine/get_fonts.py          # 下开源字体(SIL OFL,不随仓库分发)
 ```
 
-还需要本机已经安装的 Google Chrome 和 ffmpeg。渲染脚本打开的是本机 Chrome。字体是 SIL Open Font License，不放进仓库，所以要先跑一次 `get_fonts.py`。
+还需要本机已安装 **Google Chrome** 和 **ffmpeg**(需带 H.264 编码,如 libx264)。渲染脚本打开的是本机 Chrome;字体按 SIL Open Font License 单独下载,所以先跑一次 `get_fonts.py`。
 
-在你自己的项目里建工程，不要建在这个 skill 目录里。
+装好后,对 Agent 说一句"做一条 Vibe 知识大赏的视频,讲 XX",它会读 `SKILL.md` 自动走完整流程。
+
+## 两种风格
+
+题材决定风格,在分镜表之后定:
+
+- **C 夜曲**:讲抽象、看不见的机制(数学、逻辑、信息、物理),拆成几个当场可演的小实验。深蓝黑底、大字、带刻度的仪器与画得像实物的东西,声音完全由代码合成。拿不准就选 C。
+- **B 寓言**:讲心理 / 行为机制,从动物实验或生活场景讲到"你该怎么办"。每场一幅用代码画的扁平插画,有角色、有动作,配一首背景乐。最费工。
+
+一条片只用一套风格。两套的色、字、版式、片名卡、声音规格都在 `references/worlds.md`。
+
+## 怎么使用
+
+### 交给 Agent(推荐)
+
+把一份写好的文案,或一个选题,直接丢给装了本 skill 的 Agent。它会按 `SKILL.md` 的流程走:
+
+1. **立题和事实表** —— 一句话论点 + 概念清单,核实年份/人名/数字的出处。
+2. **找形象** —— 给每个概念找一个外行认得的东西来演(决定片子好坏的一步)。
+3. **文案 + 分镜表** —— 一句字幕一行,写清每句屏上是什么、在干什么、配什么声。
+4. **选风格** —— C 夜曲或 B 寓言。
+5. **建工程、先做最难的一镜** —— 截静帧自查。
+6. **前 30 秒样片** —— 先给你看 30 秒,确认后再铺全片。
+7. **铺全片 → 配声音 → 终检交付**。
+
+过程中它会在关键节点停下来给你看方案(找形象、分镜表、30 秒样片),确认后才往下走。
+
+### 手动跑脚本
+
+工程建在你自己的项目里,**不要建在 skill 目录内**。
 
 ```bash
+# 1. 建工程(C 夜曲;B 寓言用 --world B;竖屏/方形加 --size 1080x1920;时长默认=自带 BGM,--secs 覆盖)
 python scripts/new_film.py <工程目录> --world C
-python engine/render.py <工程目录> --serve
+
+# 2. 边写 film.js 边自查画面
+python engine/render.py <工程目录> --serve              # 浏览器实时预览
+python engine/render.py <工程目录> --sheet 16           # 全片均匀 16 帧拼一张
+python engine/render.py <工程目录> --density            # 动效密度自检:标出静止段
+
+# 3. 渲染全片(无声)
+python engine/render.py <工程目录>                      # → renders/raw.mp4
+python engine/render.py <工程目录> --jobs 4             # 长片分 4 路并行
+
+# 4. 声音 + 合片 + 封面(默认叠自带 BGM,BGM 放完视频即结尾)
+python engine/audio.py  <工程目录> --beats              # 先量 BGM 的 BPM/小节头/段落(卡点用)
+python engine/render.py <工程目录> --events             # 导出音效事件表
+python engine/audio.py  <工程目录> --probe              # 合成声音 + 合片 → renders/final.mp4,并出音轨体检图
+python engine/render.py <工程目录> --cover 18.5         # 抽一帧当封面 → renders/cover.jpg
 ```
 
-`--world` 用 `C`（夜曲）或 `B`（寓言）。命令和写法见 `references/engine.md`。
+引擎 API、命令细节、写法与坑见 `references/engine.md`;字幕/画法/找形象/分镜表见 `references/visualization.md`;声音编排见 `references/worlds.md`。
+
+## 样片
+
+TODO
 
 ## 许可
 
-引擎、脚本和文档里的方法说明使用 MIT 许可，见 `LICENSE`。
+引擎、脚本和文档里的方法说明使用 MIT 许可,见 `LICENSE`。
 
-`references/analysis.md`、`references/prompts.md` 里按成片填好的 brief，以及 `examples/stim_B`、`info_C`，字幕和画面设计来自他人的短片，版权属于原作者。这两段是学习对照，不要当成自己的作品发布。
+`references/analysis.md`、`references/prompts.md`、`references/visualization.md` 里按参考片记下的字幕和画面设计,以及 `examples/stim_B`、`examples/info_C`,来自他人的短片,**版权属于原作者**,只供学习对照,不授权复制、发布或当作自己的作品使用。做新片请用 `python scripts/new_film.py` 建空骨架,照自己的分镜表现写。
 
-## 联系
+## 致谢
 
-微信号 Yangdavee，备注来意。
-
-## 友情链接
-
-https://linux.do/
+本项目基于开源项目 **[HeyChengC/vibe-knowledge-film](https://github.com/HeyChengC/vibe-knowledge-film)** 改造而来,原项目以 MIT 许可开放。在此向原作者致谢。本仓库沿用 MIT 许可。

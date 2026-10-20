@@ -10,6 +10,8 @@
   python render.py <工程> --clip 0 12 [名字]    只渲一段 → renders/<名字或_clip>.mp4
   python render.py <工程> --events              导出音效事件表 → audio/events.json（给 audio.py）
   python render.py <工程> --det                 确定性自检：同一批时刻乱序再截一遍，逐字节比
+  python render.py <工程> --density [fps]        动效密度自检：逐帧相邻差，标出静止段（爆款静止秒<25%、无静止>4s）；可画成图 review/density.png
+  python render.py <工程> --cover 18.5           封面：在该时刻抽一帧 → renders/cover.jpg（交付物之一）
   python render.py <工程> --serve               起本地预览：浏览器开 http://127.0.0.1:8765/?play（←/→ 无，改完刷新）
 
 工程目录里只需要 index.html + film.js。引擎（vk.js、vk-kit.js、fonts/）留在本文件所在目录，
@@ -47,6 +49,8 @@ def open_page(p, url):
     pg.on("pageerror", lambda e: print("[pageerror]", e))
     pg.goto(url)
     pg.wait_for_function("window.READY === true", timeout=180000)
+    vw, vh = int(pg.evaluate("window.VW||1920")), int(pg.evaluate("window.VH||1080"))
+    if (vw, vh) != (1920, 1080): pg.set_viewport_size({"width": vw, "height": vh})   # 画幅跟随 film({ w, h })
     return b, pg
 
 def shot(pg, t):
@@ -73,9 +77,9 @@ def sheet(proj, args, name="sheet"):
     from PIL import Image, ImageDraw, ImageFont
     (proj / "review").mkdir(exist_ok=True)
     def go(pg):
-        end = pg.evaluate("END")
+        end = pg.evaluate("END"); vw, vh = int(pg.evaluate("window.VW||1920")), int(pg.evaluate("window.VH||1080"))
         ts = [float(x) for x in args] if len(args) > 1 else [round((i + .5) * end / int(args[0] if args else 16), 2) for i in range(int(args[0] if args else 16))]
-        cols = 4 if len(ts) > 6 else 2 if len(ts) > 1 else 1; tw = 1920 // cols; th = tw * 9 // 16
+        cols = 4 if len(ts) > 6 else 2 if len(ts) > 1 else 1; tw = 1920 // cols; th = tw * vh // vw
         out = Image.new("RGB", (cols * tw, -(-len(ts) // cols) * th), (20, 20, 20)); d = ImageDraw.Draw(out)
         try: font = ImageFont.truetype(str(ENGINE / "fonts/JetBrainsMono.ttf"), 18)
         except Exception: font = ImageFont.load_default()
@@ -85,6 +89,14 @@ def sheet(proj, args, name="sheet"):
             d.rectangle([x, y + th - 24, x + 78, y + th], fill=(0, 0, 0)); d.text((x + 5, y + th - 22), f"{t:.2f}", font=font, fill=(255, 230, 0))   # 时间标在左下角，不挡左上的年份 / 章节标
         out.save(proj / f"review/{name}.jpg", quality=90); print("sheet:", proj / f"review/{name}.jpg", len(ts))
     with_page(proj, go)
+
+def cover(proj, t, name="cover"):
+    """封面:在时刻 t 抽一帧 → renders/<name>.jpg(原尺寸,交付物之一)。"""
+    (proj / "renders").mkdir(exist_ok=True)
+    from PIL import Image
+    def go(pg):
+        Image.open(io.BytesIO(shot(pg, t))).convert("RGB").save(proj / f"renders/{name}.jpg", quality=92)
+    with_page(proj, go); print("cover:", proj / f"renders/{name}.jpg", f"@ {t}s")
 
 def frames(proj, out, a=0.0, b=None):
     def go(pg):
@@ -131,6 +143,62 @@ def det(proj, n=12):
         print("deterministic" if not bad else f"NOT deterministic at {bad} —— 有东西在跨帧存状态或用了 Math.random()")
     with_page(proj, go)
 
+def density(proj, fps=4.0):
+    """动效密度自检：以 fps 采样，缩小算相邻帧平均像素差，标出静止段。
+    爆款实测（《内卷的天平》等）：全片几乎无静止、每 2 秒都有肉眼可见变化。
+    门槛：相邻采样差均值不要太低；任何>4 秒的静止都要改；静止秒占比 < 25%。"""
+    import numpy as np
+    from PIL import Image
+    def go(pg):
+        end = pg.evaluate("END"); vw, vh = int(pg.evaluate("window.VW||1920")), int(pg.evaluate("window.VH||1080"))
+        rw, rh = 320, max(1, round(320 * vh / vw)); ts = [round(i / fps, 3) for i in range(int(end * fps))]
+        prev = None; diffs = []
+        for t in ts:
+            im = np.asarray(Image.open(io.BytesIO(shot(pg, t))).convert("L").resize((rw, rh))).astype("float32")
+            diffs.append(0.0 if prev is None else float(np.abs(im - prev).mean())); prev = im
+        return ts, diffs
+    ts, diffs = with_page(proj, go)
+    arr = np.array(diffs[1:]); step = 1.0 / fps
+    thr = 1.0                                          # 平均灰度差 < 1 视为"几乎没动"
+    still = arr < thr
+    still_sec = still.sum() * step; total = len(arr) * step
+    # 连续静止段
+    runs = []; i = 0
+    while i < len(still):
+        if still[i]:
+            j = i
+            while j < len(still) and still[j]: j += 1
+            runs.append((ts[i + 1], ts[min(j, len(ts) - 1)], (j - i) * step)); i = j
+        else: i += 1
+    long = [r for r in runs if r[2] >= 4.0]
+    print(f"动效密度: 采样 {fps}fps  相邻差均值 {arr.mean():.2f}  中位 {np.median(arr):.2f}  峰值 {arr.max():.2f}")
+    print(f"静止秒(<{thr}) {still_sec:.1f}/{total:.0f}s = {100 * still_sec / max(total, 1e-9):.0f}%  (爆款<25%)")
+    if long:
+        print(f"⚠ 静止 ≥4 秒的段 {len(long)} 处（必须改，加微动效/换画面）:")
+        for a, b, d in long: print(f"    {a:.1f}-{b:.1f}s  静了 {d:.1f}s")
+    elif runs:
+        print(f"零碎静止段 {len(runs)} 处（都 <4s，可接受）: " + ", ".join(f"{a:.1f}-{b:.1f}" for a, b, _ in runs[:8]))
+    else:
+        print("没有静止段 —— 画面一直在动 ✓")
+    try:
+        from PIL import ImageDraw, ImageFont
+        W, Hh, m = 1600, 320, 60; pw = W - 2 * m
+        img = Image.new("RGB", (W, Hh), (16, 16, 22)); dd = ImageDraw.Draw(img)
+        try: font = ImageFont.truetype(str(ENGINE / "fonts/NotoSansSC-VF.ttf"), 15)
+        except Exception:
+            try: font = ImageFont.truetype(str(ENGINE / "fonts/JetBrainsMono.ttf"), 15)
+            except Exception: font = ImageFont.load_default()
+        y0, y1 = 40, 250; mx = max(arr.max(), thr * 2, 1e-9)
+        for a, b, _ in runs:                           # 静止段底色标红
+            dd.rectangle([m + pw * a / ts[-1], y0, m + pw * b / ts[-1], y1], fill=(50, 24, 24))
+        dd.line([(m, y1 - (y1 - y0) * thr / mx), (m + pw, y1 - (y1 - y0) * thr / mx)], fill=(120, 60, 60))  # 阈值线
+        pts = [(m + pw * ts[j + 1] / ts[-1], y1 - (y1 - y0) * arr[j] / mx) for j in range(len(arr))]
+        if len(pts) > 1: dd.line(pts, fill=(120, 220, 255), width=1)
+        dd.text((m, 10), f"动效密度 相邻{1 / fps:.2f}s帧差  静止<{thr}红底  静止占比{100 * still_sec / max(total, 1e-9):.0f}%  (爆款<25%)", font=font, fill=(230, 230, 120))
+        for s in range(0, int(ts[-1]) + 1, 15): dd.text((m + pw * s / ts[-1], Hh - 18), f"{s}s", font=font, fill=(150, 150, 160))
+        (proj / "review").mkdir(exist_ok=True); img.save(proj / "review/density.png"); print("图:", proj / "review/density.png")
+    except Exception as e: print("（画图跳过：", e, "）")
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if not a: sys.exit(__doc__)
@@ -151,5 +219,10 @@ if __name__ == "__main__":
         frames(proj, proj / f"renders/{name}.mp4", float(a[i + 1]), float(a[i + 2]))
     elif "--events" in a: events(proj)
     elif "--det" in a: det(proj)
+    elif "--density" in a:
+        i = a.index("--density"); fps = float(a[i + 1]) if len(a) > i + 1 and not a[i + 1].startswith("-") else 4.0
+        density(proj, fps)
+    elif "--cover" in a:
+        i = a.index("--cover"); cover(proj, float(a[i + 1]) if len(a) > i + 1 and not a[i + 1].startswith("-") else 0.0)
     elif "--jobs" in a and int(a[a.index("--jobs") + 1]) > 1: frames_parallel(proj, proj / "renders/raw.mp4", int(a[a.index("--jobs") + 1]))
     else: frames(proj, proj / "renders/raw.mp4")

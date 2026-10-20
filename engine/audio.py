@@ -1,15 +1,28 @@
 # -*- coding: utf-8 -*-
 """按画面事件表合成配乐和音效，再和画面合成成片。
-  python audio.py <工程目录>                       # 读 audio/events.json → audio/score.wav → renders/final.mp4
-  python audio.py <工程目录> --bgm 曲子.mp3 [-8]   # 用现成配乐垫底（默认 -8 dB），事件音照样叠上去
+  python audio.py <工程目录>                       # 默认用自带 BGM(assets/default_bgm.mp3)垫底 + 事件音 → renders/final.mp4
+  python audio.py <工程目录> --bgm 曲子.mp3 [-8]   # 指定配乐垫底（默认 -8 dB），事件音照叠
+  python audio.py <工程目录> --no-bgm              # 不要 BGM，只用合成的事件音 / 床
+  python audio.py <工程目录> --beats               # 分析 BGM 的 BPM/拍点/段落 → audio/bgm_beats.json + .png（用于卡点）
+  python audio.py <工程目录> --bed                 # 合成一层 76–78BPM 的持续节拍织体（床）垫底，事件音叠在上面
+  python audio.py <工程目录> --dense               # 爆款那种"满"：床 + 不留白（关 hush）+ 响一点（-14 LUFS）
+  python audio.py <工程目录> --no-hush             # 不执行 hush 彻底静音（保留留白但不全静）
+  python audio.py <工程目录> --lufs -12            # 指定成片响度（默认：合成 -18、带床/dense -14、外来 BGM -14）
+  python audio.py <工程目录> --probe               # 导出音轨体检图 audio/probe.png（波形 + 频段能量 + 事件时间线）
   python audio.py <工程目录> --wav-only            # 只出 wav，不合成
 
 事件表由 render.py --events 导出：film.js 里每个 fr.sfx(时刻, 名字, 参数) 就是一条。
-声音的写法学自参考片（C 家族）：
-  低频长音垫底 · 每章开头一记带泛音的钟/垫和弦（约 8 秒衰减）· 屏幕上每打一个字一声"嗒" ·
-  提问处一个上滑音 · 说到噪声就真的铺噪声 · 定理落地的那一下之后留 2–3 秒彻底静音（hush）。
+声音的写法学自参考片：
+  C 夜曲（稀疏留白派）：低频长音垫底 · 每章一记带泛音的钟/垫和弦 · 屏上每打一个字一声"嗒" ·
+    提问处上滑音 · 说到噪声就铺噪声 · 定理落地后 hush 2–3 秒彻底静音。整体安静（约 -18 LUFS）。
+  爆款知识大赏（密集织体派，如《内卷的天平》）：全片几乎无静音、-10dB 上下、76BPM 脉冲 + 不断的
+    shaker 颗粒织体垫底，事件重音叠在床上，段落随叙事起伏。要这种质感就加 --bed / --dense。
+
 事件名：tick / soft / chord / bloom / rise / thud / tock / stamp / shimmer / hush（参数 dur，秒）
-META（film.js 的 meta）：{ root: 半音偏移, noise: [[起,止,强度0..1],...], silence: [[起,止],...], drone: 0..1 }
+META（film.js 的 meta）：{ root: 半音偏移, noise: [[起,止,强度0..1],...], silence: [[起,止],...], drone: 0..1,
+  bed: { bpm: 77, key: 'Am'|'Dm'|'Em', gain: 1.0, sections: '0,8,pad;8,40,full;...' } }
+  bed 的段落织体从轻到满：pad < piano < full < arp < outro。写了 bed 字段就默认合成床（无需 --bed）。
+  床是连续的音乐垫底，不受 hush / silence 门控——这正是"爆款从不留白"的来源。
 """
 import json, subprocess, sys
 from pathlib import Path
@@ -20,6 +33,8 @@ SR = 48000
 D3 = 146.83
 PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21]           # 大调五声，嗒声从这里取音高
 CHORD = [0, 7, 12, 14, 19, 24, 26]                   # 根音、五度、八度、九度…… 叠成"开阔"的和弦
+KEY_TONIC = {"Am": 7, "Dm": 0, "Em": 2}              # 相对 D3 基准的主音半音偏移（床的调）
+DEFAULT_BGM = Path(__file__).resolve().parent.parent / "assets" / "default_bgm.mp3"   # 没指定 --bgm 时默认用它
 
 def hz(semi, base=D3): return base * 2 ** (semi / 12)
 def env_exp(n, tau, attack=0.004):
@@ -94,10 +109,103 @@ def reverb(x, rng, t60=3.6, wet=.42):
     wetsig = np.stack([fftconvolve(x[:, c], ir[:, c])[:len(x)] for c in (0, 1)], 1)
     return x + wetsig * wet
 
-def synth(spec, bgm=False):
+# ───────────────────────── 持续节拍织体（床 / bed）─────────────────────────
+# 爆款的声音底色：76–78BPM 的小调进行（i–VI–III–VII），sub-bass pad 持续铺底 +
+# 钢琴柱式和弦落在小节头 + 8 分音符 shaker 的颗粒织体 + 可选琶音。段落从轻到满随叙事起伏。
+# 床连续不断，不受 hush/silence 门控——满、不留白，正是《内卷的天平》那类片子的质感。
+PROG = [                                              # 相对主音的和弦音（半音）；bass 是该和弦的低音
+    dict(bass=-24, notes=[0, 3, 7, 12]),              # i    （如 Am）
+    dict(bass=-28, notes=[-4, 0, 3, 8]),              # VI   （F）
+    dict(bass=-21, notes=[3, 7, 10, 15]),             # III  （C）
+    dict(bass=-26, notes=[-2, 2, 5, 10]),             # VII  （G）
+]
+TEX_LVL = {"pad": .55, "piano": .75, "full": 1.0, "arp": .9, "outro": .5}
+
+def bed_env(n, fin, fout):
+    e = np.ones(n); fi = min(int(fin * SR), n // 2); fo = min(int(fout * SR), n // 2)
+    if fi > 0: e[:fi] = np.linspace(0, 1, fi) ** 0.6
+    if fo > 0: e[-fo:] *= np.linspace(1, 0, fo)
+    return e
+def bed_pad(f, dur):                                  # 持续、微失谐的 pad（合唱感）
+    n = int(dur * SR); t = np.arange(n) / SR
+    w = (np.sin(2 * np.pi * f * t) + .45 * np.sin(2 * np.pi * f * 1.004 * t)
+         + .22 * np.sin(2 * np.pi * f * 2 * t) + .12 * np.sin(2 * np.pi * f * .5 * t))
+    return w * bed_env(n, .9, .9)
+def bed_shaker(rng, amp):
+    n = int(.06 * SR); ns = highpass(rng.standard_normal(n), 5500)
+    return ns * np.exp(-np.arange(n) / (n * .2)) * amp
+def bed_kick(amp):
+    n = int(.3 * SR); t = np.arange(n) / SR; f = 90 * np.exp(-t * 20) + 45
+    return np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 8) * amp
+
+def synth_bed(dur, rng, bpm=77, key="Am", gain=1.0, sections=None, root=0):
+    n = int((dur + .3) * SR); out = np.zeros((n, 2))
+    beat = 60.0 / bpm; bar = beat * 4; tonic = KEY_TONIC.get(key, 7) + root
+    def tex(t):
+        if not sections: return "full"
+        for a, b, x in sections:
+            if a <= t < b: return x
+        return sections[-1][2]
+    tpos, ci = 0.0, 0                                 # pad + bass：每小节换和弦，交叠不断层
+    while tpos < dur:
+        ch = PROG[ci % 4]; d = min(bar, dur - tpos)
+        if d < .3: break
+        lvl = TEX_LVL.get(tex(tpos), .9)
+        for k, semi in enumerate(ch["notes"]):
+            add(out, pan(bed_pad(hz(tonic + semi), d + .8) * (.05 * lvl / (1 + .35 * k)), (k % 3 - 1) * .45), tpos)
+        add(out, pan(bed_pad(hz(tonic + ch["bass"]), d + .6) * .085 * lvl, 0), tpos)
+        tpos += d; ci += 1
+    tpos, ci = 0.0, 0                                 # 钢琴柱式和弦：小节头
+    while tpos < dur - .4:
+        tx = tex(tpos)
+        if tx in ("piano", "full", "arp", "outro"):
+            for semi in PROG[ci % 4]["notes"][2:]:
+                x = tone(hz(tonic + semi + 12), beat * 3.2, 1.6, ((1, 1), (2, .4), (3, .18)), attack=.004)
+                add(out, pan(x * (.08 if tx != "outro" else .05), 0), tpos)
+        tpos += bar; ci += 1
+    tpos, bi = 0.0, 0                                 # kick：full 段每两拍
+    while tpos < dur - .2:
+        if tex(tpos) == "full" and bi % 2 == 0: add(out, pan(bed_kick(.18), 0), tpos)
+        tpos += beat; bi += 1
+    tpos = 0.0                                        # shaker：full/arp 走 8 分，piano 走 4 分（持续颗粒织体）
+    while tpos < dur - .1:
+        tx = tex(tpos)
+        if tx in ("full", "arp"):
+            add(out, pan(bed_shaker(rng, .05), rng.uniform(-.2, .2)), tpos)
+            add(out, pan(bed_shaker(rng, .03), rng.uniform(-.2, .2)), tpos + beat / 2)
+        elif tx == "piano":
+            add(out, pan(bed_shaker(rng, .028), 0), tpos)
+        tpos += beat
+    tpos, ci = 0.0, 0                                 # 琶音：arp 段
+    while tpos < dur - .2:
+        if tex(tpos) == "arp":
+            for k, semi in enumerate(PROG[ci % 4]["notes"]):
+                x = tone(hz(tonic + semi + 12), beat * .8, .5, ((1, 1), (2, .3)), attack=.003)
+                add(out, pan(x * .05, (k % 2 * 2 - 1) * .3), tpos + k * beat / 2)
+        tpos += bar; ci += 1
+    out = out[:int(dur * SR)]; t = np.arange(len(out)) / SR
+    out *= (np.clip(t / 1.0, 0, 1) * np.clip((dur - t) / 1.2, 0, 1))[:, None]   # 整床缓起缓收
+    return out * gain * .9
+
+def resolve_bed(cfg, root):
+    """把 meta.bed（True / {} / dict）规整成 synth_bed 的参数。"""
+    if cfg is True or cfg == {} or cfg is None: cfg = {}
+    sec = cfg.get("sections"); sections = None
+    if isinstance(sec, str) and sec.strip():
+        sections = []
+        for s in sec.split(";"):
+            s = s.strip()
+            if not s: continue
+            a, b, tx = s.split(","); sections.append((float(a), float(b), tx.strip()))
+    elif isinstance(sec, (list, tuple)):
+        sections = [(float(x[0]), float(x[1]), str(x[2])) for x in sec]
+    return dict(bpm=cfg.get("bpm", 77), key=cfg.get("key", "Am"),
+                gain=cfg.get("gain", 1.0), sections=sections, root=root)
+
+def synth(spec, bgm=False, bed=None, hush_scale=1.0):
     end = spec["end"]; meta = spec.get("meta") or {}; n = int((end + .05) * SR); rng = np.random.default_rng(20261006)
     dry = np.zeros((n, 2)); t = np.arange(n) / SR; root = meta.get("root", 0)
-    hush = [(when, when + p.get("dur", 2.5)) for when, name, p in spec["events"] if name == "hush"]
+    hush = [(when, when + p.get("dur", 2.5)) for when, name, p in spec["events"] if name == "hush"] if hush_scale > 0 else []
     for when, name, p in spec["events"]:
         if name in EV: add(dry, EV[name](rng, dict(p, root=p.get("root", 0) + root) if name in ("chord", "bloom") else p), when)
     out = reverb(dry, rng)
@@ -113,7 +221,9 @@ def synth(spec, bgm=False):
     for a, b in list(meta.get("silence", [])) + hush:  # 彻底静音：0.15s 收掉，0.4s 回来
         g *= 1 - np.clip((t - a) / .15, 0, 1) * (1 - np.clip((t - b) / .4, 0, 1))
     g *= np.clip(t / .6, 0, 1) * np.clip((end - t) / 1.2, 0, 1)
-    out *= g[:, None]
+    out *= g[:, None]                                 # 事件音 / drone / 噪声 受 hush·silence 门控
+    if not bgm and bed is not None:                   # 床垫在门控之后：连续不断，hush 也不掐它
+        b = synth_bed(end, rng, **bed); m = min(len(b), len(out)); out[:m] += b[:m]
     return out
 
 def write_wav(path, x):
@@ -121,20 +231,152 @@ def write_wav(path, x):
     x = np.clip(x, -1, 1); pcm = (x * 32767).astype("<i2")
     with wave.open(str(path), "wb") as w: w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR); w.writeframes(pcm.tobytes())
 
+def probe(path, x, spec):
+    """音轨体检图：你听不到声音，就把它画出来看。波形包络 + 低/中/高频能量 + 事件时间线。"""
+    from PIL import Image, ImageDraw, ImageFont
+    mono = x.mean(1); dur = len(mono) / SR
+    W, H = 1600, 560; m = 70; pw = W - 2 * m
+    img = Image.new("RGB", (W, H), (16, 16, 22)); d = ImageDraw.Draw(img)
+    fdir = Path(__file__).resolve().parent / "fonts"; font = None
+    for fn in ("NotoSansSC-VF.ttf", "NotoSerifSC-VF.ttf", "JetBrainsMono.ttf"):   # 标签含中文，优先用带 CJK 的字体
+        try: font = ImageFont.truetype(str(fdir / fn), 15); break
+        except Exception: pass
+    if font is None: font = ImageFont.load_default()
+    def X(tt): return m + pw * tt / max(dur, 1e-9)
+    # 1) 波形包络（峰值）
+    y0, y1 = 40, 190; cy = (y0 + y1) // 2
+    hop = max(1, len(mono) // pw)
+    d.text((m, y0 - 22), "波形包络 waveform", font=font, fill=(200, 200, 210))
+    for px in range(pw):
+        i = px * hop; seg = mono[i:i + hop]
+        if not len(seg): break
+        a = np.abs(seg).max(); hh = int(a * (y1 - y0) / 2)
+        d.line([(m + px, cy - hh), (m + px, cy + hh)], fill=(120, 200, 255))
+    d.line([(m, cy), (m + pw, cy)], fill=(60, 60, 70))
+    # 2) 频段能量（低<250 / 中250-2k / 高>2k），随时间
+    y0, y1 = 250, 400
+    d.text((m, y0 - 22), "频段能量 低(蓝) 中(绿) 高(橙)  —— 高频是'嗒/沙'类音效/织体", font=font, fill=(200, 200, 210))
+    N, Hh = 2048, 1024; from numpy.fft import rfft, rfftfreq
+    freqs = rfftfreq(N, 1 / SR); win = np.hanning(N)
+    los, mis, his, ts = [], [], [], []
+    for i in range(0, len(mono) - N, Hh):
+        sp = np.abs(rfft(mono[i:i + N] * win))
+        los.append(sp[freqs < 250].sum()); mis.append(sp[(freqs >= 250) & (freqs < 2000)].sum()); his.append(sp[freqs >= 2000].sum()); ts.append(i / SR)
+    los, mis, his = np.array(los), np.array(mis), np.array(his)
+    mx = max(los.max(), mis.max(), his.max(), 1e-9)
+    for arr, col in ((los, (90, 150, 255)), (mis, (110, 220, 130)), (his, (255, 170, 80))):
+        pts = [(X(ts[j]), y1 - (y1 - y0) * arr[j] / mx) for j in range(len(ts))]
+        if len(pts) > 1: d.line(pts, fill=col, width=1)
+    d.line([(m, y1), (m + pw, y1)], fill=(60, 60, 70))
+    # 3) 事件时间线
+    y0 = 440; names = sorted({nm for _, nm, _ in spec["events"]})
+    palette = [(255, 120, 120), (120, 220, 255), (255, 210, 110), (180, 150, 255), (140, 230, 160), (255, 160, 200), (200, 200, 200), (120, 255, 220), (255, 180, 120), (160, 200, 255)]
+    colmap = {nm: palette[i % len(palette)] for i, nm in enumerate(names)}
+    d.text((m, y0 - 22), f"事件时间线 ({len(spec['events'])} 条)", font=font, fill=(200, 200, 210))
+    for when, nm, _ in spec["events"]:
+        row = names.index(nm); yy = y0 + row * 10
+        c = colmap.get(nm, (200, 200, 200)); d.line([(X(when), yy), (X(when), yy + 8)], fill=c, width=2)
+    lx = m + pw - 150
+    for i, nm in enumerate(names):
+        d.rectangle([lx, 440 + i * 16, lx + 10, 450 + i * 16], fill=colmap[nm]); d.text((lx + 16, 438 + i * 16), nm, font=font, fill=(200, 200, 210))
+    # 时间刻度
+    for s in range(0, int(dur) + 1, 10): d.text((X(s), H - 18), f"{s}s", font=font, fill=(150, 150, 160))
+    # 概况
+    peak = float(np.abs(mono).max()); rms = float(np.sqrt((mono ** 2).mean()))
+    sil = int((np.abs(mono) < rms * 0.12).mean() * 100)
+    d.text((m, 8), f"dur {dur:.1f}s  peak {peak:.3f}  rms {20 * np.log10(rms + 1e-9):.1f}dBFS  低音静默占比≈{sil}%  (静默越低越'满')", font=font, fill=(230, 230, 120))
+    img.save(path); print("probe:", path)
+
+def media_dur(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)], capture_output=True, text=True)
+        return float(r.stdout.strip())
+    except Exception: return None
+
+def analyze_bgm(path, outdir):
+    """量 BGM 的 BPM、拍点、小节头、段落边界，写 bgm_beats.json + .png。卡点时把分镜关键时刻对到小节头、最大揭晓对到段落边界。"""
+    import tempfile, wave, json as _json
+    sr = 22050; tmp = Path(tempfile.mktemp(suffix=".wav"))
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(path), "-ac", "1", "-ar", str(sr), str(tmp)], check=True)
+    w = wave.open(str(tmp), "rb"); x = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(float) / 32768; w.close(); tmp.unlink()
+    dur = len(x) / sr; N, Hh = 1024, 256; win = np.hanning(N); fe = sr / Hh
+    prev = None; flux = []; rms = []
+    for i in range(0, len(x) - N, Hh):
+        sp = np.abs(np.fft.rfft(x[i:i + N] * win)); rms.append(np.sqrt((x[i:i + N] ** 2).mean()))
+        flux.append(0.0 if prev is None else float(np.maximum(0, sp - prev).sum())); prev = sp
+    flux = np.array(flux); flux = np.maximum(0, flux - flux.mean()); rms = np.array(rms)
+    ac = np.correlate(flux, flux, "full")[len(flux) - 1:]
+    lo, hi = int(fe * 60 / 200), int(fe * 60 / 60)
+    lag = lo + int(np.argmax(ac[lo:hi])); bpm = 60 * fe / lag; beat = 60 / bpm
+    best = (0.0, -1)                                       # 相位：让拍网格对齐到最强的 onset
+    for o in np.arange(0, beat, beat / 24):
+        idx = (np.arange(o, dur, beat) * fe).astype(int); idx = idx[idx < len(flux)]
+        s = flux[idx].sum()
+        if s > best[1]: best = (o, s)
+    beats = [round(float(b), 3) for b in np.arange(best[0], dur, beat)]
+    downbeats = beats[::4]
+    sm = np.convolve(rms, np.ones(max(1, int(fe * 2))) / max(1, int(fe * 2)), "same")   # 段落：RMS 大变化
+    nov = np.abs(np.diff(sm)); thr = nov.mean() + 2.5 * nov.std(); rt = np.arange(len(rms)) * Hh / sr; sec = [0.0]
+    for i in range(1, len(nov)):
+        if nov[i] > thr and rt[i] - sec[-1] > 6: sec.append(round(float(rt[i]), 2))
+    data = {"file": str(path), "duration": round(dur, 2), "bpm": round(bpm, 1), "beat": round(beat, 3), "beats": beats, "downbeats": downbeats, "sections": sec}
+    Path(outdir).mkdir(parents=True, exist_ok=True)
+    _json.dump(data, open(Path(outdir) / "bgm_beats.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        W2, H2, mg = 1600, 300, 60; pw = W2 - 2 * mg; img = Image.new("RGB", (W2, H2), (16, 16, 22)); d = ImageDraw.Draw(img)
+        fdir = Path(__file__).resolve().parent / "fonts"; font = None
+        for fn in ("NotoSansSC-VF.ttf", "JetBrainsMono.ttf"):
+            try: font = ImageFont.truetype(str(fdir / fn), 15); break
+            except Exception: pass
+        if font is None: font = ImageFont.load_default()
+        X = lambda tt: mg + pw * tt / max(dur, 1e-9); y0, y1 = 60, 210; mx = sm.max() + 1e-9
+        pts = [(X(rt[j]), y1 - (y1 - y0) * sm[j] / mx) for j in range(0, len(sm), 4)]
+        if len(pts) > 1: d.line(pts, fill=(110, 200, 255))
+        for b in beats: d.line([(X(b), y1), (X(b), y1 + 9)], fill=(90, 110, 130))
+        for b in downbeats: d.line([(X(b), y1), (X(b), y1 + 20)], fill=(255, 210, 110), width=2)
+        for s in sec: d.line([(X(s), y0 - 10), (X(s), y1 + 24)], fill=(255, 120, 120), width=2)
+        d.text((mg, 12), f"{Path(path).name}  {dur:.1f}s  ~{bpm:.0f}BPM  beat {beat:.3f}s   金=小节头  红=段落边界", font=font, fill=(230, 230, 120))
+        for s in range(0, int(dur) + 1, 15): d.text((X(s), H2 - 18), f"{s}s", font=font, fill=(150, 150, 160))
+        img.save(Path(outdir) / "bgm_beats.png")
+    except Exception as e: print("(beats 图跳过:", e, ")")
+    print(f"beats: {Path(outdir) / 'bgm_beats.json'}  ~{bpm:.0f}BPM  {len(beats)} 拍  段落 {sec}")
+    return data
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if not a: sys.exit(__doc__)
     proj = Path(a[0]).resolve(); spec = json.load(open(proj / "audio/events.json", encoding="utf-8"))
-    bgm = a[a.index("--bgm") + 1] if "--bgm" in a else None
-    bgm_db = float(a[a.index("--bgm") + 2]) if bgm and len(a) > a.index("--bgm") + 2 and a[a.index("--bgm") + 2].lstrip("-").replace(".", "").isdigit() else -8
-    x = synth(spec, bgm=bool(bgm)); pk = np.abs(x).max() or 1; x = x / pk * 10 ** (-3 / 20)
-    wav = proj / "audio/score.wav"; write_wav(wav, x); print("score:", wav, f"{len(x) / SR:.1f}s", len(spec["events"]), "events")
+    meta = spec.get("meta") or {}; root = meta.get("root", 0)
+    no_bgm = "--no-bgm" in a
+    if "--bgm" in a: bgm = a[a.index("--bgm") + 1]
+    elif no_bgm: bgm = None
+    else: bgm = str(DEFAULT_BGM) if DEFAULT_BGM.exists() else None      # 没指定就用自带 BGM
+    bgm_db = -8
+    if "--bgm" in a and len(a) > a.index("--bgm") + 2 and a[a.index("--bgm") + 2].lstrip("-").replace(".", "").isdigit(): bgm_db = float(a[a.index("--bgm") + 2])
+    if "--beats" in a:                                                 # 只分析 BGM 的拍点 / 段落,给卡点用
+        analyze_bgm(bgm or str(DEFAULT_BGM), proj / "audio"); sys.exit()
+    dense = "--dense" in a
+    want_bed = ("--bed" in a) or dense or (meta.get("bed") is not None and meta.get("bed") is not False)
+    no_hush = ("--no-hush" in a) or dense
+    bed = resolve_bed(meta.get("bed"), root) if (want_bed and not bgm) else None
+    x = synth(spec, bgm=bool(bgm), bed=bed, hush_scale=0.0 if no_hush else 1.0)
+    pk = np.abs(x).max() or 1; x = x / pk * 10 ** (-3 / 20)
+    wav = proj / "audio/score.wav"; write_wav(wav, x)
+    print("score:", wav, f"{len(x) / SR:.1f}s", len(spec["events"]), "events",
+          f"bed={bed['bpm']}BPM {bed['key']}" if bed else "bed=off", "hush=off" if no_hush else "hush=on")
+    if "--probe" in a: probe(proj / "audio/probe.png", x, spec)
     if "--wav-only" in a: sys.exit()
+    # 成片响度：合成很安静可留 -18；带床/dense/外来 BGM 要"满"，收到 -14（可用 --lufs 覆盖）
+    if "--lufs" in a: lufs = float(a[a.index("--lufs") + 1])
+    elif bgm or bed is not None or dense: lufs = -14
+    else: lufs = -18
     raw, out, end = proj / "renders/raw.mp4", proj / "renders/final.mp4", spec["end"]
-    if bgm:   # 现成配乐：垫底 + 事件音；整体到 -14 LUFS
-        fc = f"[2:a]atrim=0:{end},volume={bgm_db}dB,afade=t=in:d=0.4,afade=t=out:st={end - 1.5}:d=1.5[b];[1:a][b]amix=inputs=2:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[a]"
-        cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-i", str(wav), "-stream_loop", "-1", "-i", bgm, "-filter_complex", fc]
-    else:     # 合成配乐本来就安静、动态大：只到 -18 LUFS，别压扁
-        cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-i", str(wav), "-filter_complex", "[1:a]loudnorm=I=-18:TP=-1.5:LRA=14[a]"]
+    if bgm:   # 配乐垫底 + 事件音；不循环，BGM 放完即结束（工程 dur 设成 BGM 时长时正好收尾）
+        bdur = media_dur(bgm) or end; flen = min(end, bdur); fo = max(0.1, flen - 2)
+        fc = f"[2:a]volume={bgm_db}dB,afade=t=in:d=0.6,afade=t=out:st={fo}:d=2[b];[1:a][b]amix=inputs=2:normalize=0:duration=longest,loudnorm=I={lufs}:TP=-1.5:LRA=11[a]"
+        cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-i", str(wav), "-i", bgm, "-filter_complex", fc]
+    else:
+        cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-i", str(wav), "-filter_complex", f"[1:a]loudnorm=I={lufs}:TP=-1.5:LRA={11 if bed is not None else 14}[a]"]
     subprocess.run(cmd + ["-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-shortest", str(out)], check=True)
-    print("done", out)
+    print("done", out, f"loudnorm {lufs} LUFS", f"bgm={Path(bgm).name}" if bgm else "bgm=off")

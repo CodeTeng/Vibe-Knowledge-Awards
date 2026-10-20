@@ -8,7 +8,7 @@
  */
 (function (G) {
 'use strict';
-const W = 1920, H = 1080;
+let W = 1920, H = 1080;                                      // 画幅：默认 16:9；可由 VK.film({ w, h }) 改成竖屏/方形等
 
 /* ---------- 时间与数学 ---------- */
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
@@ -230,6 +230,7 @@ function stars(x, t, n, k) {
 
 /* ---------- 影片 ---------- */
 function film(spec) {
+  if (spec.w) W = spec.w; if (spec.h) H = spec.h;            // 画幅跟随 film({ w, h })，默认 1920×1080
   const cv = document.getElementById('stage'); cv.width = W; cv.height = H;
   const out = cv.getContext('2d');
   const mk = () => { const c = document.createElement('canvas'); c.width = W; c.height = H; return c; };
@@ -269,6 +270,7 @@ function film(spec) {
   function events() { SFX.length = 0; collecting = true; const keep = F.L; for (let i = 0; i <= spec.dur * fps; i++) { fr.t = i / fps; fr.frame = i; fr.x = keep.getContext('2d'); fr.look = { bgo: {} }; try { spec.draw(fr, i / fps); } catch (e) { } } collecting = false; const seen = new Set(), uniq = []; SFX.forEach(e => { const k = e[0] + e[1]; if (!seen.has(k)) { seen.add(k); uniq.push(e); } }); uniq.sort((a, b) => a[0] - b[0]); return uniq; }
 
   G.seek = seek; G.END = spec.dur; G.FPS = fps; G.events = events; G.META = spec.meta || {};
+  G.VW = W; G.VH = H; if (G.VK) { G.VK.W = W; G.VK.H = H; }   // 把实际画幅暴露给 render.py（设 viewport）
   document.fonts.ready.then(() => Promise.all(Object.values(FONTS).map(f => document.fonts.load(`${f[0]} 40px ${f[1].split(',')[0]}`, '运A1')))).then(() => { G.READY = true; seek(+(new URLSearchParams(location.search).get('t') || 0)); });
   /* 预览：?play 实时播，←/→ 步进 */
   if (new URLSearchParams(location.search).has('play')) { let t0 = performance.now(); const loop = () => { seek(((performance.now() - t0) / 1000) % spec.dur); requestAnimationFrame(loop); }; document.fonts.ready.then(() => requestAnimationFrame(loop)); }
