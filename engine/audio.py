@@ -40,6 +40,10 @@ def hz(semi, base=D3): return base * 2 ** (semi / 12)
 def env_exp(n, tau, attack=0.004):
     t = np.arange(n) / SR
     return np.minimum(1, t / attack) * np.exp(-t / tau)
+def soft_onset(n, rise):                              # 等功率 S 形淡入：把"从静音里瞬间满响"软化成缓起，专治大事件的"炸"
+    e = np.ones(n); r = min(int(rise * SR), n)
+    if r > 0: e[:r] = np.sin(np.linspace(0, np.pi / 2, r)) ** 2
+    return e
 def lowpass(x, fc, order=2):
     b, a = butter(order, fc / (SR / 2), "low"); return lfilter(b, a, x, axis=0)
 def highpass(x, fc, order=2):
@@ -73,11 +77,12 @@ def ev_chord(rng, p):
         out += pan(x * (.11 / (1 + k * .22)), (k % 3 - 1) * .5)
     sub = tone(hz(root - 12), 6, 2.2, ((1, 1),), attack=.02)
     out[:len(sub)] += pan(sub * .16, 0)
+    out *= soft_onset(len(out), .18)[:, None]         # 整块大和弦从静音里缓起（~0.18s），不再"炸"地满响
     return out * p.get("gain", 1)
 def ev_bloom(rng, p):                                 # 闪白：和弦 + 一口气的噪声扫过
-    out = ev_chord(rng, {"root": p.get("root", 0), "gain": 1.15 * p.get("gain", 1)})
-    n = int(1.6 * SR); ns = rng.standard_normal((n, 2)) * env_exp(n, .35, .01)[:, None]
-    out[:n] += lowpass(highpass(ns, 500), 7000) * .12
+    out = ev_chord(rng, {"root": p.get("root", 0), "gain": p.get("gain", 1)})
+    n = int(1.6 * SR); ns = rng.standard_normal((n, 2)) * env_exp(n, .35, .05)[:, None]
+    out[:n] += lowpass(highpass(ns, 500), 7000) * .1 * soft_onset(n, .12)[:, None]   # 噪声扫频也缓起，不在起点炸
     return out
 def ev_rise(rng, p):                                  # 上滑音：提问、蓄势
     dur = p.get("dur", 1.0); n = int(dur * SR); t = np.arange(n) / SR
@@ -206,8 +211,13 @@ def synth(spec, bgm=False, bed=None, hush_scale=1.0):
     end = spec["end"]; meta = spec.get("meta") or {}; n = int((end + .05) * SR); rng = np.random.default_rng(20261006)
     dry = np.zeros((n, 2)); t = np.arange(n) / SR; root = meta.get("root", 0)
     hush = [(when, when + p.get("dur", 2.5)) for when, name, p in spec["events"] if name == "hush"] if hush_scale > 0 else []
-    for when, name, p in spec["events"]:
-        if name in EV: add(dry, EV[name](rng, dict(p, root=p.get("root", 0) + root) if name in ("chord", "bloom") else p), when)
+    last_big = -9.9                                   # 同刻叠多个大和弦(chord/bloom)能量会翻倍→炸；临近(0.35s内)就自动分摊增益
+    for when, name, p in sorted(spec["events"], key=lambda e: e[0]):
+        if name in EV:
+            if name in ("chord", "bloom"):
+                if when - last_big < 0.35: p = dict(p, gain=p.get("gain", 1) * 0.6)
+                last_big = when
+            add(dry, EV[name](rng, dict(p, root=p.get("root", 0) + root) if name in ("chord", "bloom") else p), when)
     out = reverb(dry, rng)
     if not bgm:                                       # 低频长音垫底：两个略微失谐的正弦 + 很慢的呼吸
         lv = .05 * meta.get("drone", 1)
@@ -352,8 +362,10 @@ if __name__ == "__main__":
     if "--bgm" in a: bgm = a[a.index("--bgm") + 1]
     elif no_bgm: bgm = None
     else: bgm = str(DEFAULT_BGM) if DEFAULT_BGM.exists() else None      # 没指定就用自带 BGM
-    bgm_db = -8
+    bgm_db = -5
     if "--bgm" in a and len(a) > a.index("--bgm") + 2 and a[a.index("--bgm") + 2].lstrip("-").replace(".", "").isdigit(): bgm_db = float(a[a.index("--bgm") + 2])
+    ev_db = float(a[a.index("--ev") + 1]) if "--ev" in a else 2.0      # 事件音（动效声）相对增益，让动效声浮在 BGM 之上
+    soften = [float(s) for s in a[a.index("--soften") + 1].split(",")] if "--soften" in a else []   # 手动在这些秒对 BGM 做高斯音量 dip（默认空=完全不碰 BGM），其余全曲不动
     if "--beats" in a:                                                 # 只分析 BGM 的拍点 / 段落,给卡点用
         analyze_bgm(bgm or str(DEFAULT_BGM), proj / "audio"); sys.exit()
     dense = "--dense" in a
@@ -374,9 +386,12 @@ if __name__ == "__main__":
     raw, out, end = proj / "renders/raw.mp4", proj / "renders/final.mp4", spec["end"]
     if bgm:   # 配乐垫底 + 事件音；不循环，BGM 放完即结束（工程 dur 设成 BGM 时长时正好收尾）
         bdur = media_dur(bgm) or end; flen = min(end, bdur); fo = max(0.1, flen - 2)
-        fc = f"[2:a]volume={bgm_db}dB,afade=t=in:d=0.6,afade=t=out:st={fo}:d=2[b];[1:a][b]amix=inputs=2:normalize=0:duration=longest,loudnorm=I={lufs}:TP=-1.5:LRA=11[a]"
+        # 线性混音 + 只限峰（alimiter），不做动态 loudnorm：BGM 保持原曲动态，不会被事件音瞬态触发忽大忽小（泵感）。
+        # 默认完全不碰 BGM；只有显式 --soften 秒,秒 才在那几秒对 BGM 做局部高斯凹陷（窗口外=原曲）。
+        sv = (",volume=eval=frame:volume='1" + "".join(f"*(1-0.7*exp(-((t-{ti})/0.6)*((t-{ti})/0.6)))" for ti in soften) + "'") if soften else ""
+        fc = f"[2:a]volume={bgm_db}dB{sv},afade=t=in:d=0.6,afade=t=out:st={fo}:d=2[b];[1:a]volume={ev_db}dB[e];[e][b]amix=inputs=2:normalize=0:duration=longest,alimiter=level_in=1:level_out=1:limit=0.95:attack=5:release=60[a]"
         cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-i", str(wav), "-i", bgm, "-filter_complex", fc]
     else:
         cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-i", str(wav), "-filter_complex", f"[1:a]loudnorm=I={lufs}:TP=-1.5:LRA={11 if bed is not None else 14}[a]"]
     subprocess.run(cmd + ["-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-shortest", str(out)], check=True)
-    print("done", out, f"loudnorm {lufs} LUFS", f"bgm={Path(bgm).name}" if bgm else "bgm=off")
+    print("done", out, (f"linear+limit bgm={Path(bgm).name} {bgm_db}dB ev+{ev_db}dB（无动态归一/无泵感）" if bgm else f"loudnorm {lufs} LUFS bgm=off"))
